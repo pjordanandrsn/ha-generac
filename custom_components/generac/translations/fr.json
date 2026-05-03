@@ -1,0 +1,35 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "generac",
+        "description": "Si vous avez besoin d'aide pour la configuration, regardez ici: https://github.com/binarydev/ha-generac",
+        "data": {
+          "username": "Identifiant",
+          "password": "Mot de Passe",
+          "session_cookie": "Cookie de session"
+        }
+      }
+    },
+    "error": {
+      "auth": "Identifiant ou mot de passe erroné."
+    },
+    "abort": {
+      "single_instance_allowed": "Une seule instance est autorisée."
+    }
+  },
+  "options": {
+    "step": {
+      "user": {
+        "data": {
+          "binary_sensor": "Capteur binaire activé",
+          "image": "Image activé",
+          "scan_interval": "Intervalle d’interrogation en secondes",
+          "sensor": "Capteur activé",
+          "switch": "Interrupteur activé",
+          "weather": "Capteur météo activé"
+        }
+      }
+    }
+  }
+}
