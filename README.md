@@ -1,7 +1,11 @@
 # Generac MobileLink (Anderson fork) — Home Assistant integration
 
-[![HACS Custom][hacs-badge]][hacs]
+[![HACS Default][hacs-badge]][hacs]
 [![Validate][validate-badge]][validate-workflow]
+
+> **✅ Available in HACS** — this integration is in the [HACS][hacs]
+> **default** store, so you can install it directly from HACS with no
+> custom repository needed. See [Install via HACS](#install-via-hacs).
 
 A Home Assistant custom integration that polls the Generac MobileLink
 cloud and exposes whole-home generators (and propane tank monitors) as
@@ -34,10 +38,23 @@ the UI and the integration handles refresh forever.
 
 This fork tracks PR #267 with one extra patch (see
 [Differences from upstream PR #267](#differences-from-upstream-pr-267))
-and ships it as a HACS-installable custom repository so other
+and is published in the HACS **default** store so other
 MobileLink users aren't blocked on the upstream review queue.
 
 ## Install via HACS
+
+This integration is in the HACS **default** store, so you can install it
+directly — no custom repository needed:
+
+1. In Home Assistant, open **HACS**.
+2. Search for **Generac MobileLink (Anderson fork)** and click
+   **Download**.
+3. Restart Home Assistant.
+4. **Settings → Devices & Services → Add Integration → Generac
+   MobileLink** and follow [First-time setup](#first-time-setup).
+
+<details>
+<summary>Alternative: add as a custom repository</summary>
 
 1. In Home Assistant, open **HACS**.
 2. Open the top-right menu and pick **Custom repositories**.
@@ -50,6 +67,7 @@ MobileLink users aren't blocked on the upstream review queue.
 6. Restart Home Assistant.
 7. **Settings → Devices & Services → Add Integration → Generac
    MobileLink** and follow [First-time setup](#first-time-setup).
+</details>
 
 ## Manual install (no HACS)
 
@@ -173,6 +191,6 @@ based on PR #267 by sslivins.
 [generac-migration]: https://support.generac.com/s/article/Mobile-Link-Migration
 [license]: ./LICENSE
 [hacs]: https://github.com/hacs/integration
-[hacs-badge]: https://img.shields.io/badge/HACS-Custom-orange.svg
+[hacs-badge]: https://img.shields.io/badge/HACS-Default-blue.svg
 [validate-workflow]: https://github.com/pjordanandrsn/ha-generac/actions/workflows/validate.yaml
 [validate-badge]: https://github.com/pjordanandrsn/ha-generac/actions/workflows/validate.yaml/badge.svg
