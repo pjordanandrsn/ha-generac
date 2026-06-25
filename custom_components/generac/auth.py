@@ -96,6 +96,49 @@ class InvalidCredentialsError(Exception):
     """Raised when the user-supplied email/password is rejected at login."""
 
 
+class MfaRequiredError(Exception):
+    """Raised mid-login when Auth0 demands a one-time MFA code.
+
+    The login can't finish in one shot because the code is only sent
+    (SMS / email) or generated (authenticator app) *after* the password
+    is accepted. This carries the live `GeneracLoginFlow` so the caller
+    (the HA config flow) can prompt the user for the code and resume via
+    `flow.submit_mfa_code(code)`. The isolated login session is left open
+    while paused — the caller must eventually finish the flow or call
+    `flow.aclose()`.
+    """
+
+    def __init__(
+        self,
+        flow: "GeneracLoginFlow",
+        mfa_type: str,
+        challenge_url: str,
+        state: str,
+    ) -> None:
+        self.flow = flow
+        self.mfa_type = mfa_type
+        self.challenge_url = challenge_url
+        self.state = state
+        super().__init__(f"MFA required (type={mfa_type})")
+
+
+class InvalidMfaCodeError(Exception):
+    """Raised when the user-supplied MFA code is wrong or has expired.
+
+    Recoverable: the login session stays open so the user can retry with
+    a fresh code.
+    """
+
+
+class MfaUnsupportedError(Exception):
+    """Raised when Auth0 demands an MFA factor we can't drive headlessly.
+
+    Push notifications, WebAuthn/security keys and voice calls require
+    interaction we can't replicate from the integration; the user must
+    approve in the MobileLink app or switch to a code-based factor.
+    """
+
+
 @dataclass
 class DPoPKey:
     """An ES256 keypair plus precomputed JWK + RFC 7638 thumbprint."""
@@ -278,6 +321,46 @@ async def _post_login_form(
         return resp.headers["Location"]
 
 
+async def _post_mfa_challenge(
+    session: aiohttp.ClientSession, url: str, state: str, code: str
+) -> str:
+    """POST a one-time code to an Auth0 mfa-*-challenge screen.
+
+    Returns the redirect Location on acceptance (302/303). Raises
+    `InvalidMfaCodeError` when Auth0 re-renders the challenge instead of
+    redirecting — its way of saying the code was wrong or expired. Mirrors
+    `_post_login_form`: state goes in both the query string and the body,
+    and `action=default` selects the primary "verify" button.
+    """
+    headers = {
+        "User-Agent": USER_AGENT_WEB,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "text/html,*/*",
+        "Origin": f"https://{AUTH0_DOMAIN}",
+        "Referer": f"{url}?state={state}",
+    }
+    body = urllib.parse.urlencode({"state": state, "code": code, "action": "default"})
+    async with session.post(
+        url,
+        params={"state": state},
+        data=body,
+        headers=headers,
+        allow_redirects=False,
+    ) as resp:
+        if resp.status not in (302, 303):
+            text = await resp.text()
+            m = re.search(r'data-error-code="([^"]+)"', text)
+            err = m.group(1) if m else None
+            _LOGGER.warning(
+                "Generac auth: step=mfa-submit POST %s -> %s error-code=%s",
+                url,
+                resp.status,
+                err,
+            )
+            raise InvalidMfaCodeError(err or f"status={resp.status}")
+        return resp.headers["Location"]
+
+
 async def _identifier_step(
     session: aiohttp.ClientSession, state: str, email: str
 ) -> str:
@@ -315,53 +398,6 @@ async def _password_step(
     if not parsed.path.endswith("/authorize/resume"):
         raise InvalidCredentialsError(f"step=password: rejected loc={loc!r}")
     return urllib.parse.parse_qs(parsed.query)["state"][0]
-
-
-async def _resume_to_code(session: aiohttp.ClientSession, resume_state: str) -> str:
-    """GET /authorize/resume?state=… and turn the eventual app-scheme
-    redirect into the OAuth `code`.
-
-    Loops up to 3 times to handle Auth0 custom prompts (T&C updates,
-    cookie consent, account-link confirmation, etc.) that some accounts
-    have to clear once. Each prompt presents as a /u/custom-prompt/<id>
-    redirect after password — we fetch the page, post back the form
-    with its hidden state + the default action, and recurse on the new
-    resume state. Loop bound prevents infinite redirect storms if a
-    prompt can't be auto-handled.
-    """
-    headers = {"User-Agent": USER_AGENT_WEB, "Accept": "text/html,*/*"}
-    for attempt in range(3):
-        async with session.get(
-            RESUME_URL,
-            params={"state": resume_state},
-            headers=headers,
-            allow_redirects=False,
-        ) as resp:
-            if resp.status not in (302, 303):
-                body = (await resp.text())[:200]
-                raise RuntimeError(
-                    f"step=resume: expected 302/303, got {resp.status}; body={body!r}"
-                )
-            loc = resp.headers["Location"]
-        _LOGGER.warning("Generac auth: step=resume -> loc=%s", loc[:200])
-
-        if loc.startswith("com.generac.mobilelink.auth0://"):
-            qs = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)
-            if "code" not in qs:
-                raise RuntimeError(f"step=resume: no code in redirect loc={loc!r}")
-            return qs["code"][0]
-
-        if "/u/custom-prompt/" in loc:
-            resume_state = await _handle_custom_prompt(session, loc)
-            continue
-
-        raise RuntimeError(f"step=resume: unexpected scheme loc={loc!r}")
-
-    raise RuntimeError(
-        "step=resume: 3 consecutive custom prompts without reaching the "
-        "app-scheme redirect. Open the MobileLink mobile app and complete "
-        "any pending prompts (T&C, profile completion, etc.), then retry."
-    )
 
 
 async def _handle_custom_prompt(session: aiohttp.ClientSession, loc: str) -> str:
@@ -542,6 +578,244 @@ async def _exchange_code(
 
 
 # ---------------------------------------------------------------------------
+# GeneracLoginFlow — stateful, resumable universal-login transaction
+# ---------------------------------------------------------------------------
+
+
+class GeneracLoginFlow:
+    """One Auth0 universal-login attempt, resumable across an MFA pause.
+
+    Most accounts finish in a single `start()`. Accounts with a one-time
+    code factor (SMS, authenticator app, or email) pause at the challenge
+    screen: `start()` raises `MfaRequiredError` carrying this flow, the
+    caller collects the code from the user, and `submit_mfa_code()`
+    finishes the login. The isolated cookie-jar login session is kept open
+    across that pause and closed when the flow terminates (success, hard
+    failure, or an explicit `aclose()`).
+    """
+
+    # Auth0 universal-login MFA screens that accept a typed one-time code.
+    # All three POST the same `state`+`code`+`action=default` body to their
+    # own URL, so one handler drives them. Push / WebAuthn / voice are not
+    # here — they can't be completed headlessly (see MfaUnsupportedError).
+    _CODE_CHALLENGES = {
+        "mfa-sms-challenge": "sms",
+        "mfa-otp-challenge": "otp",
+        "mfa-email-challenge": "email",
+    }
+
+    def __init__(
+        self,
+        api_session: aiohttp.ClientSession,
+        email: str,
+        password: str,
+    ) -> None:
+        # Long-lived, HA-managed session — NOT owned here. Only used to
+        # construct the returned GeneracAuth (which uses it for refresh).
+        self._api_session = api_session
+        self._email = email
+        self._password = password
+        self._key = DPoPKey.generate()
+        self._verifier, self._challenge = _make_pkce()
+        # Dedicated cookie-jar session for the universal-login dance. See
+        # GeneracAuth.login's docstring for why this must stay isolated
+        # from the shared session. We own it and close it in aclose().
+        self._login_session: Optional[aiohttp.ClientSession] = aiohttp.ClientSession(
+            cookie_jar=aiohttp.CookieJar(unsafe=True)
+        )
+        # Populated when a code challenge pauses the flow.
+        self._mfa_type: Optional[str] = None
+        self._challenge_url: Optional[str] = None
+        self._mfa_state: Optional[str] = None
+
+    @property
+    def mfa_type(self) -> Optional[str]:
+        """The pending factor ("sms"/"otp"/"email"), or None if not paused."""
+        return self._mfa_type
+
+    @classmethod
+    def _challenge_type(cls, path: str) -> Optional[str]:
+        """Return the code-challenge factor for an Auth0 path, else None."""
+        for fragment, mfa_type in cls._CODE_CHALLENGES.items():
+            if fragment in path:
+                return mfa_type
+        return None
+
+    async def start(self) -> "GeneracAuth":
+        """Run the login up to the OAuth code exchange.
+
+        Returns a ready `GeneracAuth` for accounts without MFA. Raises
+        `MfaRequiredError` (leaving the session open) when Auth0 demands a
+        one-time code, or `MfaUnsupportedError` for factors we can't drive.
+        """
+        assert self._login_session is not None
+        state = _b64url(secrets.token_bytes(32))
+        login_state = await _authorize(
+            self._login_session, self._key, state, self._challenge
+        )
+        pw_state = await _identifier_step(
+            self._login_session, login_state, self._email
+        )
+        resume_state = await _password_step(
+            self._login_session, pw_state, self._email, self._password
+        )
+        code = await self._drive_resume(resume_state)
+        return await self._finish(code)
+
+    async def submit_mfa_code(self, code: str) -> "GeneracAuth":
+        """Submit the user-entered one-time code and finish the login.
+
+        On success closes the login session and returns a ready
+        `GeneracAuth`. Raises `InvalidMfaCodeError` (session left open for
+        a retry) when Auth0 rejects the code.
+        """
+        if self._login_session is None or self._challenge_url is None:
+            raise RuntimeError("submit_mfa_code called without a pending challenge")
+        loc = await _post_mfa_challenge(
+            self._login_session, self._challenge_url, self._mfa_state or "", code
+        )
+        _LOGGER.warning("Generac auth: step=mfa-submit -> loc=%s", loc[:200])
+        parsed = urllib.parse.urlparse(loc)
+
+        # Bounced back to a code-challenge screen => wrong/expired code.
+        if self._challenge_type(parsed.path) is not None:
+            raise InvalidMfaCodeError("code rejected (challenge re-presented)")
+
+        if loc.startswith("com.generac.mobilelink.auth0://"):
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "code" not in qs:
+                raise RuntimeError(f"step=mfa-submit: no code in redirect loc={loc!r}")
+            return await self._finish(qs["code"][0])
+
+        if "/u/mfa-" in parsed.path:
+            raise MfaUnsupportedError(
+                f"step=mfa-submit: unsupported follow-on factor loc={loc!r}"
+            )
+
+        if parsed.path.endswith("/authorize/resume"):
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "state" not in qs:
+                raise RuntimeError(f"step=mfa-submit: no state in loc={loc!r}")
+            # Re-enter the resume loop: post-MFA Auth0 may still serve a
+            # custom prompt (or, rarely, chain a second factor).
+            code2 = await self._drive_resume(qs["state"][0])
+            return await self._finish(code2)
+
+        raise RuntimeError(f"step=mfa-submit: unexpected redirect loc={loc!r}")
+
+    async def _drive_resume(self, resume_state: str) -> str:
+        """GET /authorize/resume?state=… and turn the eventual app-scheme
+        redirect into the OAuth `code`.
+
+        Loops up to 3 times to handle Auth0 custom prompts (T&C updates,
+        cookie consent, account-link confirmation, etc.) that some accounts
+        have to clear once. Each prompt presents as a /u/custom-prompt/<id>
+        redirect after password — we fetch the page, post back the form
+        with its hidden state + the default action, and recurse on the new
+        resume state. Loop bound prevents infinite redirect storms if a
+        prompt can't be auto-handled.
+
+        When the redirect instead lands on an Auth0 mfa-{sms,otp,email}
+        challenge, we pause by raising `MfaRequiredError`; other /u/mfa-*
+        factors raise `MfaUnsupportedError`.
+        """
+        assert self._login_session is not None
+        headers = {"User-Agent": USER_AGENT_WEB, "Accept": "text/html,*/*"}
+        for attempt in range(3):
+            async with self._login_session.get(
+                RESUME_URL,
+                params={"state": resume_state},
+                headers=headers,
+                allow_redirects=False,
+            ) as resp:
+                if resp.status not in (302, 303):
+                    body = (await resp.text())[:200]
+                    raise RuntimeError(
+                        f"step=resume: expected 302/303, got {resp.status}; body={body!r}"
+                    )
+                loc = resp.headers["Location"]
+            _LOGGER.warning("Generac auth: step=resume -> loc=%s", loc[:200])
+
+            if loc.startswith("com.generac.mobilelink.auth0://"):
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(loc).query)
+                if "code" not in qs:
+                    raise RuntimeError(f"step=resume: no code in redirect loc={loc!r}")
+                return qs["code"][0]
+
+            parsed = urllib.parse.urlparse(loc)
+            mfa_type = self._challenge_type(parsed.path)
+            if mfa_type is not None:
+                mfa_qs = urllib.parse.parse_qs(parsed.query)
+                if "state" not in mfa_qs:
+                    raise RuntimeError(
+                        f"step=resume: mfa challenge without state loc={loc!r}"
+                    )
+                self._mfa_type = mfa_type
+                self._challenge_url = f"https://{AUTH0_DOMAIN}{parsed.path}"
+                self._mfa_state = mfa_qs["state"][0]
+                _LOGGER.warning(
+                    "Generac auth: step=resume -> mfa challenge type=%s; "
+                    "pausing for one-time code",
+                    mfa_type,
+                )
+                raise MfaRequiredError(
+                    self, mfa_type, self._challenge_url, self._mfa_state
+                )
+
+            if "/u/mfa-" in parsed.path:
+                raise MfaUnsupportedError(
+                    f"step=resume: unsupported MFA factor loc={loc!r}"
+                )
+
+            if "/u/custom-prompt/" in loc:
+                resume_state = await _handle_custom_prompt(self._login_session, loc)
+                continue
+
+            raise RuntimeError(f"step=resume: unexpected scheme loc={loc!r}")
+
+        raise RuntimeError(
+            "step=resume: 3 consecutive custom prompts without reaching the "
+            "app-scheme redirect. Open the MobileLink mobile app and complete "
+            "any pending prompts (T&C, profile completion, etc.), then retry."
+        )
+
+    async def _finish(self, code: str) -> "GeneracAuth":
+        """Exchange the OAuth code for tokens and build the GeneracAuth."""
+        assert self._login_session is not None
+        tokens = await _exchange_code(
+            self._login_session, self._key, code, self._verifier
+        )
+        refresh_token = tokens.get("refresh_token")
+        if not refresh_token:
+            raise RuntimeError("login: no refresh_token returned")
+        auth = GeneracAuth(
+            self._api_session, refresh_token, self._key, email=self._email
+        )
+        auth._access_token = tokens["access_token"]
+        auth._access_token_exp = time.time() + int(tokens.get("expires_in", 0))
+        _LOGGER.info(
+            "Login OK: expires_in=%s scope=%s token_type=%s",
+            tokens.get("expires_in"),
+            tokens.get("scope"),
+            tokens.get("token_type"),
+        )
+        await self.aclose()
+        return auth
+
+    async def aclose(self) -> None:
+        """Close the isolated login session. Idempotent; never raises."""
+        session = self._login_session
+        self._login_session = None
+        if session is not None and not session.closed:
+            try:
+                await session.close()
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Generac auth: error closing login session", exc_info=True
+                )
+
+
+# ---------------------------------------------------------------------------
 # GeneracAuth — the main reusable handle
 # ---------------------------------------------------------------------------
 
@@ -589,38 +863,30 @@ class GeneracAuth:
         The Auth0 universal-login flow is stateful: /authorize sets a session
         cookie that /u/login/identifier and /u/login/password require. Some
         shared sessions disable cookie quoting or scrub cookies between calls,
-        which breaks the handshake. Use a dedicated cookie-jar-backed session
-        for the login flow only; the long-lived `session` is reused afterward
-        for refresh-token rotation, which doesn't depend on cookies.
+        which breaks the handshake. `GeneracLoginFlow` uses a dedicated
+        cookie-jar-backed session for the login flow only; the long-lived
+        `session` is reused afterward for refresh-token rotation, which
+        doesn't depend on cookies.
+
+        Accounts with a one-time code factor (SMS / authenticator / email)
+        can't finish in one shot — the code is only available after the
+        password is accepted. For those this raises `MfaRequiredError`,
+        carrying a live `GeneracLoginFlow` the caller must drive via
+        `flow.submit_mfa_code(...)`. The interactive config flow uses
+        `GeneracLoginFlow` directly; this classmethod stays for non-MFA
+        callers and back-compat.
         """
-        key = DPoPKey.generate()
-        verifier, challenge = _make_pkce()
-        state = _b64url(secrets.token_bytes(32))
-
-        jar = aiohttp.CookieJar(unsafe=True)
-        async with aiohttp.ClientSession(cookie_jar=jar) as login_session:
-            login_state = await _authorize(login_session, key, state, challenge)
-            pw_state = await _identifier_step(login_session, login_state, email)
-            resume_state = await _password_step(
-                login_session, pw_state, email, password
-            )
-            code = await _resume_to_code(login_session, resume_state)
-            tokens = await _exchange_code(login_session, key, code, verifier)
-
-        refresh_token = tokens.get("refresh_token")
-        if not refresh_token:
-            raise RuntimeError("login: no refresh_token returned")
-
-        auth = cls(session, refresh_token, key, email=email)
-        auth._access_token = tokens["access_token"]
-        auth._access_token_exp = time.time() + int(tokens.get("expires_in", 0))
-        _LOGGER.info(
-            "Login OK: expires_in=%s scope=%s token_type=%s",
-            tokens.get("expires_in"),
-            tokens.get("scope"),
-            tokens.get("token_type"),
-        )
-        return auth
+        flow = GeneracLoginFlow(session, email, password)
+        try:
+            return await flow.start()
+        except MfaRequiredError:
+            # Paused for MFA. The carried flow owns the still-open session;
+            # leave it for the caller to drive or close.
+            raise
+        except BaseException:
+            # Any other terminal outcome: don't leak the login session.
+            await flow.aclose()
+            raise
 
     @classmethod
     def from_storage(
