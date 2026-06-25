@@ -12,9 +12,10 @@ cloud and exposes whole-home generators (and propane tank monitors) as
 HA entities.
 
 This is a downstream **fork** of [`binarydev/ha-generac`][upstream] that
-ships the auth rewrite from [PR #267][pr267] by [@sslivins][sslivins]
-plus a small handler for the Auth0 Forms consent prompt some
-post-migration accounts get on first login.
+ships the auth rewrite from [PR #267][pr267] by [@sslivins][sslivins],
+a handler for the Auth0 Forms consent prompt some post-migration
+accounts get on first login, and support for one-time **two-factor
+codes** (SMS / authenticator app / email) at sign-in.
 
 > **Status:** Maintained as part of the Anderson family wall-display
 > kiosk. Community PRs welcome — no SLA. If you want the official
@@ -88,12 +89,21 @@ a non-admin kiosk user, do this from a separate browser session:
 3. Search **Generac MobileLink**.
 4. Enter your **MyGenerac** email and password (the same credentials
    you use in the MobileLink mobile app).
-5. Submit. Within ~30 s, the integration creates entities for each
-   generator and tank monitor on the account.
+5. Submit.
+6. **If your account has two-factor authentication**, a second screen
+   asks for the verification code sent by text (SMS), your authenticator
+   app, or email. Enter the most recent code and submit. (Push-prompt or
+   security-key 2FA can't be completed here — approve the login in the
+   MobileLink app, or switch your Generac/ecobee account to code-based
+   2FA, then retry.)
+7. Within ~30 s, the integration creates entities for each generator and
+   tank monitor on the account.
 
 Wrong credentials surface as **"Invalid email or password"** on the
-form. Anything else surfaces as **"Unexpected error"** — check the HA
-log for the actual exception.
+form. A wrong or expired 2FA code surfaces as **"That code was incorrect
+or has expired"** on the code screen — retry with the most recent code.
+Anything else surfaces as **"Unexpected error"** — check the HA log for
+the actual exception.
 
 ### What entities you get
 
@@ -126,6 +136,13 @@ generator address) and an `image` entity exposing the device thumbnail.
   pending form interactively in the MobileLink mobile app once — Auth0
   remembers the acknowledgement account-wide for subsequent OAuth flows
   from any client.
+- **Two-factor authentication.** Code-based factors (SMS, authenticator
+  app, email) are handled in-flow — setup pauses for the code and
+  resumes once you submit it. Push-notification, security-key (WebAuthn),
+  and voice-call factors can't be completed headlessly; approve the login
+  in the MobileLink app, or switch your account to a code factor. MFA
+  support is new in this fork — if a code-based factor doesn't complete,
+  open an issue with the `Generac auth: step=` lines from your HA log.
 - **Refresh token after password change.** Rotating your MyGenerac
   password invalidates the stored refresh token. HA surfaces this as a
   `Reauth` notification — click it and re-enter the new password. No
@@ -152,7 +169,14 @@ On top of `pr3-email-password-auth` HEAD (8c550ca):
    instances.
 2. **`auth.py: WARNING-level step= logging`** — emits a step marker at
    each redirect to make first-time login debuggable from the HA log.
-3. **`manifest.json: version`** — `0.5.3-anderson-fork` to differentiate
+3. **MFA support (`auth.py: GeneracLoginFlow` + `config_flow.py:
+   async_step_mfa`)** — handles Auth0 one-time-code factors (SMS /
+   authenticator app / email): the login pauses at the challenge screen,
+   HA prompts for the code, and `submit_mfa_code()` resumes to finish.
+   Push / WebAuthn security-key / voice factors can't be driven
+   headlessly and surface an actionable error. Upstream PR #267 has no
+   MFA handling.
+4. **`manifest.json: version`** — `0.5.4-anderson-fork` to differentiate
    from upstream releases.
 
 The `_handle_custom_prompt` patch is a candidate to push back to PR
