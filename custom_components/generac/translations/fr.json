@@ -6,8 +6,7 @@
         "description": "Si vous avez besoin d'aide pour la configuration, regardez ici: https://github.com/binarydev/ha-generac",
         "data": {
           "username": "Identifiant",
-          "password": "Mot de Passe",
-          "session_cookie": "Cookie de session"
+          "password": "Mot de Passe"
         }
       }
     },

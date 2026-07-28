@@ -6,8 +6,7 @@
         "description": "Hvis du trenger hjep til konfigurasjon ta en titt her: https://github.com/binarydev/ha-generac",
         "data": {
           "username": "Brukernavn",
-          "password": "Passord",
-          "session_cookie": "Sesjonskake"
+          "password": "Passord"
         }
       }
     },

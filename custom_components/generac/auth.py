@@ -38,6 +38,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 _LOGGER = logging.getLogger(__name__)
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=45, connect=10, sock_read=30)
 
 AUTH0_DOMAIN = "auth.ecobee.com"
 AUTHORIZE_URL = f"https://{AUTH0_DOMAIN}/authorize"
@@ -248,7 +249,11 @@ async def _authorize(
     }
     headers = {"User-Agent": USER_AGENT_WEB, "Accept": "text/html,*/*"}
     async with session.get(
-        AUTHORIZE_URL, params=params, headers=headers, allow_redirects=False
+        AUTHORIZE_URL,
+        params=params,
+        headers=headers,
+        allow_redirects=False,
+        timeout=REQUEST_TIMEOUT,
     ) as resp:
         if resp.status not in (302, 303):
             body = (await resp.text())[:200]
@@ -290,6 +295,7 @@ async def _post_login_form(
         data=body,
         headers=headers,
         allow_redirects=False,
+        timeout=REQUEST_TIMEOUT,
     ) as resp:
         if resp.status not in (302, 303):
             text = await resp.text()
@@ -346,6 +352,7 @@ async def _post_mfa_challenge(
         data=body,
         headers=headers,
         allow_redirects=False,
+        timeout=REQUEST_TIMEOUT,
     ) as resp:
         if resp.status not in (302, 303):
             text = await resp.text()
@@ -432,7 +439,12 @@ async def _handle_custom_prompt(session: aiohttp.ClientSession, loc: str) -> str
     # form fields are in there. We log the relevant bits so a failing
     # POST below has actionable diagnostics in the trace.
     headers_get = {"User-Agent": USER_AGENT_WEB, "Accept": "text/html,*/*"}
-    async with session.get(abs_url, headers=headers_get, allow_redirects=False) as resp:
+    async with session.get(
+        abs_url,
+        headers=headers_get,
+        allow_redirects=False,
+        timeout=REQUEST_TIMEOUT,
+    ) as resp:
         page = await resp.text() if resp.status == 200 else ""
     nd = re.search(
         r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
@@ -493,7 +505,11 @@ async def _handle_custom_prompt(session: aiohttp.ClientSession, loc: str) -> str
     }
     body = {"state": state, "action": "default"}
     async with session.post(
-        abs_url, data=body, headers=headers_post, allow_redirects=False,
+        abs_url,
+        data=body,
+        headers=headers_post,
+        allow_redirects=False,
+        timeout=REQUEST_TIMEOUT,
     ) as resp:
         status = resp.status
         if status not in (302, 303):
@@ -559,7 +575,9 @@ async def _exchange_code(
             "DPoP": proof,
             "User-Agent": USER_AGENT_API,
         }
-        async with session.post(TOKEN_URL, json=body, headers=headers) as resp:
+        async with session.post(
+            TOKEN_URL, json=body, headers=headers, timeout=REQUEST_TIMEOUT
+        ) as resp:
             text = await resp.text()
             try:
                 payload = json.loads(text)
@@ -727,6 +745,7 @@ class GeneracLoginFlow:
                 params={"state": resume_state},
                 headers=headers,
                 allow_redirects=False,
+                timeout=REQUEST_TIMEOUT,
             ) as resp:
                 if resp.status not in (302, 303):
                     body = (await resp.text())[:200]
@@ -932,6 +951,13 @@ class GeneracAuth:
             assert self._access_token is not None
             return self._access_token
 
+    async def force_refresh(self) -> str:
+        """Refresh once after the resource server rejects an access token."""
+        async with self._refresh_lock:
+            await self._refresh()
+            assert self._access_token is not None
+            return self._access_token
+
     async def _refresh(self) -> None:
         body = {
             "grant_type": "refresh_token",
@@ -948,7 +974,7 @@ class GeneracAuth:
                 "User-Agent": USER_AGENT_API,
             }
             async with self._session.post(
-                TOKEN_URL, json=body, headers=headers
+                TOKEN_URL, json=body, headers=headers, timeout=REQUEST_TIMEOUT
             ) as resp:
                 text = await resp.text()
                 try:

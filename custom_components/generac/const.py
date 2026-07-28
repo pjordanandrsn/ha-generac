@@ -4,7 +4,7 @@
 NAME = "generac"
 DOMAIN = "generac"
 DOMAIN_DATA = f"{DOMAIN}_data"
-VERSION = "0.0.0"
+VERSION = "0.5.6"
 
 ATTRIBUTION = (
     "Data provided by https://app.mobilelinkgen.com/api. "

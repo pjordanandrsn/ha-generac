@@ -55,6 +55,22 @@ _MFA_METHOD_LABELS = {
     "otp": "your authenticator app",
     "email": "email",
 }
+_DISCARDED_AUTH_KEYS = frozenset(
+    {
+        "access_token",
+        "auth_mode",
+        "expires_at",
+        "password",
+    }
+)
+
+
+def _replace_auth_data(existing: dict, new_data: dict) -> dict:
+    """Replace discarded credentials instead of retaining stale secrets."""
+    retained = {
+        key: value for key, value in existing.items() if key not in _DISCARDED_AUTH_KEYS
+    }
+    return {**retained, **new_data}
 
 
 def _map_runtime_error(msg: str) -> str:
@@ -137,7 +153,7 @@ class GeneracFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            email = user_input[CONF_USERNAME]
+            email = user_input[CONF_USERNAME].strip()
             password = user_input[CONF_PASSWORD]
 
             try:
@@ -166,7 +182,7 @@ class GeneracFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     async def _finish_user(self, entry_data: dict):
         """Terminal action for a fresh user-initiated setup."""
         email = entry_data[CONF_USERNAME]
-        await self.async_set_unique_id(email)
+        await self.async_set_unique_id(email.casefold())
         self._abort_if_unique_id_configured()
         return self.async_create_entry(title=email, data=entry_data)
 
@@ -237,7 +253,7 @@ class GeneracFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         # "failed to unload".
         self.hass.config_entries.async_update_entry(
             entry,
-            data={**entry.data, **entry_data},
+            data=_replace_auth_data(entry.data, entry_data),
             options=new_options,
         )
         return self.async_abort(reason="reconfigure_successful")
@@ -254,9 +270,7 @@ class GeneracFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         entry = self._reauth_entry
         assert entry is not None
-        # Older config entries may not have stored email under CONF_USERNAME,
-        # so fall back to the entry title (which we set to the email at
-        # create time).
+        # Use the entry title when the email is not present in the data.
         default_email = entry.data.get(CONF_USERNAME) or entry.title or ""
 
         if user_input is not None:
@@ -298,7 +312,7 @@ class GeneracFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         # handles the reload. An explicit async_reload here would race the
         # listener-driven reload and surface as "failed to unload".
         self.hass.config_entries.async_update_entry(
-            entry, data={**entry.data, **entry_data}
+            entry, data=_replace_auth_data(entry.data, entry_data)
         )
         return self.async_abort(reason="reauth_successful")
 
