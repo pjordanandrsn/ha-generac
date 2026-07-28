@@ -1,11 +1,16 @@
 # Generac MobileLink (Anderson fork) — Home Assistant integration
 
-[![HACS Default][hacs-badge]][hacs]
-[![Validate][validate-badge]][validate-workflow]
+## ⚠️ Reconverged with upstream — install [binarydev/ha-generac](https://github.com/binarydev/ha-generac) instead
 
-> **✅ Available in HACS** — this integration is in the [HACS][hacs]
-> **default** store, so you can install it directly from HACS with no
-> custom repository needed. See [Install via HACS](#install-via-hacs).
+Upstream v0.5.2+ includes everything this fork shipped—Auth0/DPoP auth,
+SMS/authenticator/email MFA, consent-prompt handling (the MFA work
+developed here landed upstream in v0.5.2)—plus fixes and tests this
+fork lacks. This repo is winding down: removal from the HACS default
+store, then archive. Existing installs keep working; to migrate,
+install upstream over this one in HACS and restart HA—your config
+entry carries over.
+
+[![Validate][validate-badge]][validate-workflow]
 
 A Home Assistant custom integration that polls the Generac MobileLink
 cloud and exposes whole-home generators (and propane tank monitors) as
@@ -17,11 +22,9 @@ a handler for the Auth0 Forms consent prompt some post-migration
 accounts get on first login, and support for one-time **two-factor
 codes** (SMS / authenticator app / email) at sign-in.
 
-> **Status:** Maintained as part of the Anderson family wall-display
-> kiosk. Community PRs welcome — no SLA. If you want the official
-> upstream, use [`binarydev/ha-generac`][upstream] (note: as of writing,
-> upstream is still on the legacy cookie-based auth path that breaks
-> when Generac retires the old endpoints).
+> **Status:** Winding down — upstream reconverged as of v0.5.2
+> (2026-07-26) and now carries this fork's full auth + MFA stack.
+> New installs and PRs should go to [`binarydev/ha-generac`][upstream].
 
 ## Why this fork exists
 
