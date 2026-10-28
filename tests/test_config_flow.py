@@ -487,3 +487,53 @@ async def test_reconfigure_does_not_double_reload_when_loaded(
         await hass.async_block_till_done()
 
     mock_reload.assert_not_called()
+
+
+@pytest.mark.parametrize("source", ["reauth", "reconfigure"])
+async def test_credential_update_drops_stale_legacy_secrets(
+    hass: HomeAssistant, source: str
+) -> None:
+    """Reauth/reconfigure replace credentials instead of merging old secrets in.
+
+    Entries created by the retired cookie/password flows still carry
+    `password` and `session_cookie`; a plain dict merge kept them forever.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="user@example.com",
+        data={
+            CONF_USERNAME: "user@example.com",
+            CONF_PASSWORD: "legacy-password",
+            "session_cookie": "legacy-cookie",
+            CONF_REFRESH_TOKEN: "stale-rt",
+            CONF_DPOP_PEM: DPoPKey.generate().to_pem_str(),
+        },
+        options={},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": source, "entry_id": entry.entry_id},
+        data=entry.data,
+    )
+    user_input = {CONF_PASSWORD: "new-pw"}
+    if source == "reconfigure":
+        user_input[CONF_USERNAME] = "user@example.com"
+
+    new_auth = _mock_auth(refresh_token="fresh-rt")
+    with patch(
+        "custom_components.generac.config_flow.GeneracAuth.login",
+        AsyncMock(return_value=new_auth),
+    ), patch("custom_components.generac.async_setup_entry", return_value=True):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input
+        )
+        await hass.async_block_till_done()
+
+    assert result2["type"] == "abort"
+    assert dict(entry.data) == {
+        CONF_USERNAME: "user@example.com",
+        CONF_REFRESH_TOKEN: "fresh-rt",
+        CONF_DPOP_PEM: new_auth.pem_str,
+    }
